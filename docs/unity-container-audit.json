@@ -1,0 +1,69 @@
+{
+  "files": [
+    {
+      "path": "globalgamemanagers.assets",
+      "size": 3247048,
+      "sha256": "7c877fddba05c8f2bb3f0ea0548c5835be4aee71f2076b80d3e1e65e1f42c2f2",
+      "container": "serialized-or-opaque",
+      "paired_stream": true,
+      "extracted": false
+    },
+    {
+      "path": "globalgamemanagers.assets.resS",
+      "size": 7134736,
+      "sha256": "04326e1da7717ad83645decb08519340c269cf83fb4b447bc0b7030889a79756",
+      "container": "serialized-or-opaque",
+      "paired_stream": false,
+      "extracted": false
+    },
+    {
+      "path": "resources.assets",
+      "size": 30763336,
+      "sha256": "5be1dd82694649e1ff12d1d287028318003deb33821ae75b54ae6b6016e55782",
+      "container": "serialized-or-opaque",
+      "paired_stream": true,
+      "extracted": false
+    },
+    {
+      "path": "resources.assets.resS",
+      "size": 161430736,
+      "sha256": "7aabb3f2672cf2beb12f7e63d405824cd6bc0ce9459a27061624126d3bf81a77",
+      "container": "serialized-or-opaque",
+      "paired_stream": false,
+      "extracted": false
+    },
+    {
+      "path": "resources.resource",
+      "size": 113928160,
+      "sha256": "c65c18cef1fdc3a821e7b87fe68800c9bc6f7d3e94ed0f97aeae23528f040846",
+      "container": "serialized-or-opaque",
+      "paired_stream": false,
+      "extracted": false
+    },
+    {
+      "path": "sharedassets0.assets",
+      "size": 24151384,
+      "sha256": "33c17e4c783a68a1f00541e2915cd1b917a2bdc1edc53d067746e70cbf7177df",
+      "container": "serialized-or-opaque",
+      "paired_stream": true,
+      "extracted": false
+    },
+    {
+      "path": "sharedassets0.assets.resS",
+      "size": 148934528,
+      "sha256": "ac9927f478c04d7fd4ac33e1774a0e57059ac319fcbbfa7de79a00b601cba614",
+      "container": "serialized-or-opaque",
+      "paired_stream": false,
+      "extracted": false
+    },
+    {
+      "path": "sharedassets0.resource",
+      "size": 23392,
+      "sha256": "a905878c6dc4bb699b0ebf17e61ff96e715261daa2f638df8186bd3829a7e38a",
+      "container": "serialized-or-opaque",
+      "paired_stream": false,
+      "extracted": false
+    }
+  ],
+  "scope": "metadata-only"
+}

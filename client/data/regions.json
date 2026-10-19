@@ -1,0 +1,16 @@
+{
+  "training_meadow": {
+    "name": "Pradera de entrenamiento",
+    "level_min": 1,
+    "level_max": 5,
+    "npcs": ["mentor_arin"],
+    "enemies": ["training_dummy_1", "training_dummy_2", "training_dummy_3"]
+  },
+  "quiet_harbor": {
+    "name": "Puerto tranquilo",
+    "level_min": 1,
+    "level_max": 10,
+    "npcs": ["quartermaster_lynn"],
+    "enemies": []
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mentor_arin": {
+    "name": "Arin",
+    "region_id": "training_meadow",
+    "role": "mentor"
+  },
+  "quartermaster_lynn": {
+    "name": "Lynn",
+    "region_id": "quiet_harbor",
+    "role": "merchant"
+  }
+}

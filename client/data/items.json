@@ -1,0 +1,4 @@
+{
+  "training_blade": {"kind": "weapon", "slot": "main_hand", "attack": 5, "price": 50},
+  "monster_core": {"kind": "material", "slot": null, "attack": 0, "price": 0}
+}

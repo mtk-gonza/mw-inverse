@@ -1,0 +1,15 @@
+.godot/
+client/.godot/
+server/.env
+server/data/
+*.sqlite3
+__pycache__/
+*.pyc
+reference-original/
+tools/vendor/
+client/assets/reference-local/
+client/assets/reference-library/
+*.log
+*.tmp
+dist/
+build/

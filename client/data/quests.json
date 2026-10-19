@@ -1,0 +1,8 @@
+{
+  "training_hunt": {
+    "title": "Práctica de combate",
+    "target_prefix": "training_dummy",
+    "goal": 3,
+    "experience_reward": 50
+  }
+}

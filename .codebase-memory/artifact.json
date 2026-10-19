@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "",
+    "indexed_at": "2026-10-19T10:42:49Z",
+    "project": "mw-inverse",
+    "nodes": 691,
+    "edges": 2195,
+    "original_size": 20905984,
+    "compressed_size": 695948,
+    "compression_level": 9
+}

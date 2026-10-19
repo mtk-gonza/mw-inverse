@@ -1,0 +1,12 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "24500:24500"
+    volumes:
+      - mw-inverse-data:/mw-inverse/server/data
+    restart: unless-stopped
+volumes:
+  mw-inverse-data:
