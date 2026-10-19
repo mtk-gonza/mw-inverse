@@ -1,6 +1,9 @@
 extends Node3D
 
+const ReferenceOverrideModel = preload("res://scripts/reference_override.gd")
+
 @export var npc_id := "mentor_arin"
+var reference_override = ReferenceOverrideModel.new()
 
 func _ready() -> void:
 	add_to_group("npcs")
@@ -19,7 +22,22 @@ func _ready() -> void:
 	beacon.position = Vector3(0, 1.2, 0)
 	add_child(beacon)
 
+func _process(delta: float) -> void:
+	var pulse := sin(Time.get_ticks_msec() * 0.003 + global_position.x) * 0.025
+	for child in get_children():
+		if child is Sprite3D and child.name == "OriginalNpcSprite":
+			child.position.y = 0.85 + pulse
+
 func _build_npc_details() -> void:
+	var portrait := Sprite3D.new()
+	portrait.name = "OriginalNpcSprite"
+	portrait.texture = reference_override.load_slot("npc_%s" % npc_id, "res://assets/sprites/characters/player_avatar.svg")
+	portrait.pixel_size = 0.008
+	portrait.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	portrait.no_depth_test = true
+	portrait.position = Vector3(0, 0.85, -0.1)
+	portrait.modulate = Color(1.0, 0.78, 0.4, 0.9) if npc_id == "mentor_arin" else (Color(0.4, 1.0, 0.7, 0.9) if npc_id == "quartermaster_lynn" else Color(0.45, 0.75, 1.0, 0.9))
+	add_child(portrait)
 	var halo := MeshInstance3D.new()
 	var halo_mesh := TorusMesh.new()
 	halo_mesh.inner_radius = 0.28

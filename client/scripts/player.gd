@@ -2,6 +2,7 @@ extends CharacterBody3D
 
 const InventoryModel = preload("res://scripts/inventory.gd")
 const PlayerStateModel = preload("res://scripts/domain/player_state.gd")
+const ReferenceOverrideModel = preload("res://scripts/reference_override.gd")
 
 const SPEED := 5.0
 const GRAVITY := 18.0
@@ -20,6 +21,9 @@ var target_marker: MeshInstance3D
 var animation_time := 0.0
 var wing_nodes: Array[MeshInstance3D] = []
 var weapon_node: MeshInstance3D
+var avatar_sprite: Sprite3D
+var camera_base_position := Vector3.ZERO
+var reference_override = ReferenceOverrideModel.new()
 var action_time := 0.0
 var selected_target_id := ""
 enum ActionState { IDLE, MOVING, ATTACKING, CASTING, HIT, DEAD }
@@ -29,6 +33,7 @@ func _ready() -> void:
 	state.position = global_position
 	$Nameplate.text = "Gurdock\nNv. %d" % state.level
 	_build_avatar_details()
+	camera_base_position = $Camera.position
 	target_marker = MeshInstance3D.new()
 	var ring := TorusMesh.new()
 	ring.inner_radius = 0.72
@@ -44,8 +49,7 @@ func _ready() -> void:
 	var reference_ring := Sprite3D.new()
 	reference_ring.name = "ReferenceTargetRing"
 	var reference_ring_path := "res://assets/reference-library/Sprite/resources_AutoTargetRing_2567.png"
-	if ResourceLoader.exists(reference_ring_path):
-		reference_ring.texture = load(reference_ring_path) as Texture2D
+	reference_ring.texture = reference_override.load_slot("target_ring", reference_ring_path)
 	reference_ring.pixel_size = 0.002
 	reference_ring.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	reference_ring.no_depth_test = true
@@ -57,6 +61,15 @@ func _ready() -> void:
 	get_parent().call_deferred("add_child", target_marker)
 
 func _build_avatar_details() -> void:
+	avatar_sprite = Sprite3D.new()
+	avatar_sprite.name = "OriginalAvatarSprite"
+	avatar_sprite.texture = reference_override.load_slot("player_avatar", "res://assets/sprites/characters/player_avatar.svg")
+	avatar_sprite.pixel_size = 0.0085
+	avatar_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	avatar_sprite.no_depth_test = true
+	avatar_sprite.position = Vector3(0, 0.82, -0.12)
+	avatar_sprite.modulate = Color(1, 1, 1, 0.96)
+	add_child(avatar_sprite)
 	var head := MeshInstance3D.new()
 	var head_mesh := SphereMesh.new()
 	head_mesh.radius = 0.3
@@ -168,6 +181,14 @@ func _physics_process(delta: float) -> void:
 	if weapon_node != null:
 		weapon_node.rotation_degrees.x = -12.0 if action_time > 0.0 else 0.0
 		weapon_node.rotation_degrees.z = -38.0 if action_time > 0.0 else -22.0
+	if avatar_sprite != null:
+		var motion_bob := sin(animation_time * (11.0 if moving else 4.0)) * (0.035 if moving else 0.012)
+		var attack_pulse := clampf(action_time / 0.32, 0.0, 1.0)
+		avatar_sprite.position.y = 0.82 + motion_bob + attack_pulse * 0.08
+		avatar_sprite.scale = Vector3.ONE * (1.0 + attack_pulse * 0.1)
+		avatar_sprite.rotation_degrees.z = sin(animation_time * 8.0) * 2.0 if moving else 0.0
+	var camera_bob := sin(animation_time * (8.0 if moving else 2.5)) * (0.035 if moving else 0.012)
+	$Camera.position = camera_base_position + Vector3(0, camera_bob, 0)
 	state.position = global_position
 	_update_target_marker()
 	if Input.is_action_just_pressed("attack"):

@@ -1,17 +1,17 @@
 # Especificación inicial de sistemas
 
-| Sistema | Estado | Próxima pregunta |
+| Sistema | Estado actual | Próxima ampliación |
 |---|---|---|
-| Cliente Godot | Inicial | ¿2D, 3D o vista híbrida? |
-| Servidor autoritativo | Pendiente | ¿Qué estado debe validar el servidor? |
-| Login | Pendiente | ¿Cuenta local durante el prototipo? |
-| Personajes | Pendiente | ¿Qué atributos y clases existen? |
-| Movimiento | Pendiente | ¿Mapa por zonas o mundo continuo? |
-| Combate | Pendiente | ¿Tiempo real, turnos o híbrido? |
-| Inventario | Pendiente | ¿Slots, peso, equipamiento? |
-| Misiones | Pendiente | ¿Objetivos y recompensas? |
-| Persistencia | Pendiente | ¿Qué datos se guardan? |
-| Red | Pendiente | ¿Frecuencia de sincronización y autoridad? |
+| Cliente Godot | 3D, cámara cenital y HUD funcional | loading, controles configurables y pulido |
+| Servidor autoritativo | TCP/JSON, autoridad de estado y transporte separado | módulos de dominio y persistencia |
+| Login | cuentas locales, PBKDF2, refresh tokens y MFA TOTP | proveedor externo |
+| Personajes | atributos, nivel, equipo, energía y progresión | clases y estadísticas derivadas |
+| Movimiento | validación de límites, obstáculos y región | predicción y reconciliación |
+| Combate | tiempo real, skills, guardia, PvP y loot | estados, balance y telegráficos |
+| Inventario | objetos, consumibles, equipo, compra, venta y crafting | slots, peso y economía avanzada |
+| Misiones | progreso persistente y recompensas | ramas y elecciones |
+| Persistencia | SQLite, migración, journal y backups | locks y despliegue distribuido |
+| Red | snapshots, tokens, rate limits y reconexión | TLS probado y carga multicliente |
 
 ## Primer modelo de dominio observado
 

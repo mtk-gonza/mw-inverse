@@ -1,12 +1,15 @@
-# Servidor
+# Servidor autoritativo local
 
-El servidor será autoritativo: el cliente solicitará acciones y el servidor
-validará movimiento, combate, inventario y persistencia.
+El servidor valida movimiento, combate, inventario, economía, chat, regiones,
+sesiones y persistencia. El transporte TCP/JSON está separado en
+`server/transport.py`, `server/session.py`, `server/auth.py`,
+`server/combat.py`, `server/economy.py`, `server/social.py` y
+`server/world_rules.py`, `server/world_simulation.py`, `server/progression.py`;
+`server/main.py` conserva el
+dispatcher y el contrato actual para mantener compatibilidad con el cliente y
+las pruebas existentes.
 
-Durante el primer vertical slice se usará una sesión local. La implementación
-de red se añadirá después de fijar el modelo de dominio y los mensajes.
-
-## Prototipo local
+## Ejecución local
 
 Requiere Python 3.11+ y no utiliza paquetes externos:
 
@@ -14,13 +17,15 @@ Requiere Python 3.11+ y no utiliza paquetes externos:
 python server/main.py
 ```
 
-Escucha únicamente en `127.0.0.1:24500`. Acepta mensajes JSON delimitados por
-línea para `login_request`, `world_snapshot`, `move_intent`,
-`grant_test_item` y `save_request`.
+Escucha por defecto en `127.0.0.1:24500`. Se puede configurar con
+`MW_INVERSE_HOST`, `MW_INVERSE_PORT`, `MW_INVERSE_TLS_CERT` y
+`MW_INVERSE_TLS_KEY`.
 
-`world_snapshot` también devuelve el estado de los enemigos de la región.
-El mensaje `chat_message` normaliza y limita mensajes a 200 caracteres antes
-de emitir un `chat_event`.
+Los mensajes son objetos JSON delimitados por línea. Incluyen autenticación,
+snapshots de mundo, movimiento, combate, habilidades, regiones, NPCs,
+exploración, inventario, crafting, tienda, comercio, chat, grupos, clanes,
+PvP, matchmaking, métricas, backups y guardado. El transporte limita cada
+mensaje a 64 KiB y las solicitudes mutantes soportan `request_id`.
 
 El estado se persiste en `server/data/mw_inverse.sqlite3`, que está excluido
 del repositorio.

@@ -41,6 +41,7 @@ El alcance cerrado del experimento está descrito en
 La matriz de trabajo y las limitaciones están en
 `docs/reconstruction-matrix.md` y `docs/implementation-status.md`.
 El plan maestro de finalización está en `docs/TODO-completo.md`.
+El backlog específico de comparación con REA está en `docs/TODO-rea-gaps.md`.
 
 ## Motor local
 

@@ -2,7 +2,7 @@
 
 ## Artefacto de referencia
 
-`D:\Juegos\MagicWings2\current`
+`C:\Users\gonzalo.gonzalez\AppData\Local\MagicWingsBOTeado\current`
 
 La instalación observada contiene un juego Unity con ensamblados administrados
 en `Magic Wings_Data/Managed/` y BepInEx instalado. Esto sugiere una primera

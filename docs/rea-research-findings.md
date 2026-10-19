@@ -1,5 +1,17 @@
 # Auditoría REA de la referencia local
 
+## Build actualmente seleccionado
+
+- Ruta: `C:\Users\gonzalo.gonzalez\AppData\Local\MagicWingsBOTeado\current`
+- Plataforma observada: PE/CLI x86, Unity Mono, metadata CIL.
+- La identidad del build debe rastrearse por SHA-256 y MVID; los tokens de
+  metadata son locales al build y no se deben comparar por número de token.
+- Esta pasada REA es estática: no cargó ni ejecutó assemblies y no demuestra
+  comportamiento runtime.
+
+Evidencia de identidad: `ev_d8d4ecd2d6305572b3a6d1da6739801dc533eaf202c991776663f10fde0a3f28`
+para `Assembly-CSharp.dll`.
+
 Esta auditoría usa únicamente la copia local de referencia y observa metadata,
 firmas, CIL, literales y bordes estáticos. No afirma que el análisis estático
 haya ejecutado el juego ni que reproduzca su protocolo de red.

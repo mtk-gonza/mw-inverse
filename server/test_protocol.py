@@ -357,6 +357,19 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("frost_lantern", result["discovered"])
         self.assertIn("frost_lantern", main.STORAGE.load("scout")["discovered_shrines"])
 
+    async def test_exploration_snapshot_rejects_stale_request(self) -> None:
+        player, _ = await main.handle_message(None, {"type": "login_request", "player_id": "versioned-scout"})
+        _, current = await main.handle_message(player, {
+            "type": "exploration_snapshot", "request_version": 2,
+        })
+        self.assertTrue(current["ok"])
+        _, stale = await main.handle_message(player, {
+            "type": "exploration_snapshot", "request_version": 1,
+        })
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["reason"], "stale_request")
+        self.assertEqual(stale["request_version"], 2)
+
     async def test_decor_place_and_store(self) -> None:
         player, _ = await main.handle_message(None, {"type": "login_request", "player_id": "builder"})
         _, placed = await main.handle_message(player, {"type": "decor_place", "piece_id": "ice_lamp", "x": 2, "z": -1})
@@ -383,6 +396,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         _, hit = await main.handle_message(attacker, {"type": "pvp_attack", "target_id": "target"})
         self.assertTrue(hit["ok"])
         self.assertEqual(hit["damage"], 10)
+        self.assertGreater(hit["pvp_status"]["skull"], 0)
+        self.assertGreater(hit["target_pvp_status"]["mark"], 0)
 
     async def test_trade_moves_offered_items(self) -> None:
         first, _ = await main.handle_message(None, {"type": "login_request", "player_id": "trader-a"})

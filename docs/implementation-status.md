@@ -47,7 +47,7 @@
 
 - Proyecto: `mw-inverse`.
 - Índice actualizado: 2026-10-19.
-- Grafo: 681 nodos y 2.185 relaciones.
+- Grafo: 702 nodos y 2.324 relaciones.
 - Cobertura parcial conocida: `client/scripts/main.gd` y `scripts/check-all.ps1` tienen rangos con recuperación del parser.
 - Se excluyen deliberadamente `reference-original`, `client/assets/reference-local`, datos SQLite locales y cachés.
 

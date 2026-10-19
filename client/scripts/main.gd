@@ -5,6 +5,8 @@ const NetworkClientModel = preload("res://scripts/network_client.gd")
 const RemotePlayerModel = preload("res://scripts/remote_player.gd")
 const ContentCatalogModel = preload("res://scripts/content_catalog.gd")
 const ReferenceAssetLibraryModel = preload("res://scripts/reference_asset_library.gd")
+const TargetingModel = preload("res://scripts/domain/targeting.gd")
+const ReferenceOverrideModel = preload("res://scripts/reference_override.gd")
 var save_system = SaveSystemModel.new()
 var network = NetworkClientModel.new()
 var content = ContentCatalogModel.new()
@@ -28,9 +30,14 @@ var inventory_icon_nodes: Array[TextureRect] = []
 var death_overlay: PanelContainer
 var settings_overlay: PanelContainer
 var party_frames: VBoxContainer
+var targeting_profile = TargetingModel.TargetingProfile.new()
+var reference_override = ReferenceOverrideModel.new()
+var exploration_session_generation := 0
+var exploration_request_version := 0
 
 func _ready() -> void:
 	print("MW Inverse local exploration scene started")
+	targeting_profile.from_dict(save_system.load_targeting_profile())
 	_setup_hotbar_icons()
 	_setup_reference_ui()
 	_setup_reference_audio()
@@ -65,6 +72,7 @@ func _ready() -> void:
 	network.connected.connect(_on_network_connected)
 	network.disconnected.connect(_on_network_disconnected)
 	network.connection_error.connect(_on_network_error)
+	network.state_changed.connect(_on_network_state_changed)
 	network.message_received.connect(_on_network_message)
 	network.connect_to_server()
 
@@ -72,29 +80,15 @@ func _setup_hotbar_icons() -> void:
 	if DisplayServer.get_name() == "headless":
 		return
 	var icons := [
-		"res://assets/sword.svg", "res://assets/arcane.svg", "res://assets/shield.svg",
-		"res://assets/potion.svg", "res://assets/potion.svg", "res://assets/party.svg",
-		"res://assets/map.svg", "res://assets/menu.svg"
+		"res://assets/ui/icons/sword.svg", "res://assets/ui/icons/arcane.svg", "res://assets/ui/icons/shield.svg",
+		"res://assets/ui/icons/potion.svg", "res://assets/ui/icons/potion.svg", "res://assets/ui/icons/party.svg",
+		"res://assets/ui/icons/map.svg", "res://assets/ui/icons/menu.svg"
 	]
 	for index in icons.size():
 		var slot := $Ui/HotbarPanel/Hotbar.get_child(index) as Button
 		var icon = load(icons[index])
 		if icon is Texture2D:
 			slot.icon = icon
-	var local_icons := {
-		0: "res://assets/reference-library/Sprite/resources_autoattack_attacking_me_2511.png",
-		1: "res://assets/reference-library/Sprite/resources_defaultspells_100_2813.png",
-		2: "res://assets/reference-library/Sprite/sharedassets0_skill_shielding_1291.png",
-		3: "res://assets/reference-library/Sprite/resources_potion_2274.png",
-		4: "res://assets/reference-library/Sprite/sharedassets0_attr_healAndShield_1054.png",
-		5: "res://assets/reference-library/Sprite/resources_autoattack_help_party_2485.png",
-		6: "res://assets/reference-library/Sprite/sharedassets0_caminho_map_1207.png",
-		7: "res://assets/reference-library/Sprite/resources_AchievementIcon_2337.png",
-	}
-	for index in local_icons:
-		var reference_icon = _load_optional(local_icons[index])
-		if reference_icon is Texture2D:
-			($Ui/HotbarPanel/Hotbar.get_child(index) as Button).icon = reference_icon
 
 func _setup_reference_ui() -> void:
 	if DisplayServer.get_name() == "headless":
@@ -108,7 +102,7 @@ func _setup_reference_ui() -> void:
 		"MapPanel/Map/ReferenceMarker": "res://assets/reference-local/sharedassets0_player-mark-minimap_32x32_1305.png",
 	}
 	for node_path in references:
-		var texture = load(references[node_path])
+		var texture = reference_override.load_texture(references[node_path].get_file(), references[node_path])
 		if texture is Texture2D:
 			get_node("Ui/" + node_path).texture = texture
 
@@ -188,6 +182,9 @@ func _setup_reference_world_materials() -> void:
 			tree_material.albedo_color = Color(0.7, 0.9, 0.78, 1.0)
 
 func _load_optional(path: String) -> Resource:
+	var private_texture := reference_override.load_texture(path.get_file())
+	if private_texture != null:
+		return private_texture
 	if not ResourceLoader.exists(path):
 		return null
 	return load(path)
@@ -379,10 +376,10 @@ func _on_inventory_changed(items: Dictionary) -> void:
 
 func _setup_inventory_icons() -> void:
 	var paths := [
-		"res://assets/reference-library/Sprite/sharedassets0_eq_swordshield_1422.png",
-		"res://assets/reference-library/Sprite/resources_potion_2274.png",
-		"res://assets/reference-library/Sprite/resources_batwing_2281.png",
-		"res://assets/reference-library/Sprite/resources_Magic_Wing_Icon_0_1982.png",
+		"res://assets/ui/icons/sword.svg",
+		"res://assets/ui/icons/potion.svg",
+		"res://assets/ui/icons/arcane.svg",
+		"res://assets/ui/icons/shield.svg",
 	]
 	for index in 8:
 		var icon := TextureRect.new()
@@ -412,7 +409,7 @@ func _update_inventory_icons(items: Dictionary) -> void:
 		if index >= inventory_icon_nodes.size():
 			break
 		var icon := inventory_icon_nodes[index]
-		var texture_path: String = item_paths.get(item_id, "res://assets/reference-library/Sprite/resources_potion_2274.png")
+		var texture_path: String = item_paths.get(item_id, "res://assets/ui/icons/potion.svg")
 		icon.texture = _load_optional(texture_path) as Texture2D
 		icon.tooltip_text = "%s x%d" % [item_id, items[item_id]]
 		icon.visible = true
@@ -423,6 +420,21 @@ func _on_network_connected() -> void:
 	$Player.use_server_combat = true
 	last_network_position = $Player.global_position
 	network.send_message({"type": "login_request", "player_id": "local-player"})
+
+func _on_network_state_changed(state: String, reason: String) -> void:
+	var labels := {
+		"connecting": "conectando",
+		"connected": "conectado",
+		"protected": "sesión protegida",
+		"reconnecting": "reconectando",
+		"stalled": "sin respuesta",
+		"protocol_error": "error de protocolo",
+		"closed": "cerrado",
+		"disconnected": "desconectado",
+	}
+	$Ui/NetworkStatus.text = "Servidor: " + str(labels.get(state, state))
+	if not reason.is_empty():
+		$Ui/NetworkStatus.text += " · " + reason
 
 func _on_network_disconnected() -> void:
 	$Ui/NetworkStatus.text = "Servidor: desconectado · modo local"
@@ -436,9 +448,12 @@ func _on_network_message(message: Dictionary) -> void:
 	if message_type == "login_result" and message.get("ok", false):
 		network.session_token = str(message.get("token", ""))
 		$Player.import_state(message.state)
+		exploration_session_generation = int(message.state.get("exploration_session_generation", 0))
+		exploration_request_version = 0
 		_update_health_status()
 		last_network_position = $Player.global_position
 		$Ui/NetworkStatus.text = "Servidor: sesión activa"
+		network._set_state("protected", "login_ok")
 		network.send_message({"type": "world_snapshot"})
 	elif message_type == "session_event" and not message.get("ok", false):
 		network.session_token = ""
@@ -495,6 +510,10 @@ func _on_network_message(message: Dictionary) -> void:
 		else:
 			$Ui/PartyStatus.text = "Clan: " + str(message.get("reason", "error"))
 	elif message_type == "exploration_event":
+		var generation := int(message.get("session_generation", exploration_session_generation))
+		var version := int(message.get("request_version", 0))
+		if generation != exploration_session_generation or version < exploration_request_version:
+			return
 		if message.get("ok", false):
 			$Ui/DialogueStatus.text = "Exploración: %d santuario(s) descubierto(s)" % message.get("discovered", []).size()
 			$Ui/QuestStatus.text = "Santuarios: " + ", ".join(message.get("discovered", []))
@@ -542,6 +561,14 @@ func _on_network_message(message: Dictionary) -> void:
 				_hide_defeated_enemy(str(message.target_id))
 		elif message.get("guarded", false):
 			$Ui/CombatStatus.text = "Guardia activa"
+	elif message_type == "pvp_event":
+		if not message.get("ok", false):
+			$Ui/CombatStatus.text = "PvP rechazado: " + str(message.get("reason", "error"))
+		else:
+			var status: Dictionary = message.get("pvp_status", {})
+			$Ui/CombatStatus.text = "PvP confirmado · marca %.0fs · skull %.0fs%s" % [
+				float(status.get("mark", 0.0)), float(status.get("skull", 0.0)),
+				" · derrota" if message.get("defeated", false) else ""]
 	elif message_type == "item_event":
 		if message.get("ok", false):
 			$Player.state.energy = int(message.energy)
@@ -693,8 +720,11 @@ func _hide_defeated_enemy(target_id: String) -> void:
 	for candidate in get_tree().get_nodes_in_group("enemies"):
 		if candidate.get("target_id") == target_id:
 			_show_loot_effect(candidate.global_position)
-			candidate.visible = false
-			candidate.set("is_defeated", true)
+			if candidate.has_method("play_defeat"):
+				candidate.play_defeat()
+			else:
+				candidate.visible = false
+				candidate.set("is_defeated", true)
 
 func _on_hotbar_skill() -> void:
 	var target_id := _nearest_target_id()
@@ -772,22 +802,18 @@ func _apply_region_visuals(region: Dictionary) -> void:
 		$WorldEnvironment.environment.fog_light_color = Color(0.22, 0.38, 0.68, 1.0)
 
 func _show_loot_effect(start_position: Vector3) -> void:
-	var loot := MeshInstance3D.new()
-	var mesh := SphereMesh.new()
-	mesh.radius = 0.18
-	mesh.height = 0.36
-	loot.mesh = mesh
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(1, 0.78, 0.2, 1)
-	material.emission_enabled = true
-	material.emission = Color(0.8, 0.35, 0.02, 1)
-	loot.material_override = material
+	var loot := Sprite3D.new()
+	loot.texture = reference_override.load_slot("loot", "res://assets/sprites/effects/loot_orb.svg")
+	loot.pixel_size = 0.005
+	loot.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	loot.no_depth_test = true
 	loot.global_position = start_position + Vector3(0, 1.0, 0)
 	add_child(loot)
 	var tween := create_tween()
 	tween.set_trans(Tween.TRANS_QUAD)
 	tween.set_ease(Tween.EASE_IN_OUT)
 	tween.tween_property(loot, "global_position", $Player.global_position + Vector3(0, 1.0, 0), 0.55)
+	tween.parallel().tween_property(loot, "scale", Vector3(1.5, 1.5, 1.5), 0.55)
 	tween.tween_callback(loot.queue_free)
 
 func _show_reference_combat_effect(target_id: String, skill: bool) -> void:
@@ -795,7 +821,7 @@ func _show_reference_combat_effect(target_id: String, skill: bool) -> void:
 		if str(candidate.get("target_id")) != target_id:
 			continue
 		var effect := Sprite3D.new()
-		effect.texture = _load_optional("res://assets/reference-library/Sprite/resources_defaultspells_100_2813.png") as Texture2D if skill else _load_optional("res://assets/reference-library/Sprite/sharedassets0_fx_rank_rays_0_857.png") as Texture2D
+		effect.texture = reference_override.load_slot("spell_effect" if skill else "hit_spark", "res://assets/ui/icons/arcane.svg" if skill else "res://assets/sprites/effects/hit_spark.svg")
 		if effect.texture == null:
 			return
 		effect.pixel_size = 0.018
@@ -821,7 +847,7 @@ func _launch_reference_projectile(target_id: String, skill: bool) -> void:
 		_show_reference_combat_effect(target_id, skill)
 		return
 	var projectile := Sprite3D.new()
-	projectile.texture = _load_optional("res://assets/reference-library/Sprite/resources_defaultspells_100_2813.png") as Texture2D if skill else _load_optional("res://assets/reference-library/Sprite/sharedassets0_eq_swordshield_1422.png") as Texture2D
+	projectile.texture = reference_override.load_slot("spell_projectile" if skill else "attack_projectile", "res://assets/ui/icons/arcane.svg" if skill else "res://assets/ui/icons/sword.svg")
 	if projectile.texture == null:
 		return
 	projectile.pixel_size = 0.009
@@ -841,7 +867,7 @@ func _launch_reference_projectile(target_id: String, skill: bool) -> void:
 
 func _show_guard_effect() -> void:
 	var effect := Sprite3D.new()
-	effect.texture = _load_optional("res://assets/reference-library/Sprite/sharedassets0_shielding_879.png") as Texture2D
+	effect.texture = reference_override.load_slot("guard_effect", "res://assets/ui/icons/shield.svg")
 	if effect.texture == null:
 		return
 	effect.pixel_size = 0.012
@@ -935,6 +961,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event.keycode == KEY_F5:
 		if save_system.save_player($Player, $Player.inventory_snapshot()):
+			save_system.save_targeting_profile(targeting_profile.to_dict())
 			$Ui/SaveStatus.text = "Partida guardada"
 		else:
 			$Ui/SaveStatus.text = "No se pudo guardar"
@@ -961,7 +988,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.keycode == KEY_F7:
 		network.send_message({"type": "clan_create"})
 	elif event.keycode == KEY_F12:
-		network.send_message({"type": "exploration_snapshot"})
+		exploration_request_version += 1
+		network.send_message({"type": "exploration_snapshot", "request_version": exploration_request_version})
 	elif event.keycode == KEY_R:
 		_discover_nearest_shrine()
 	elif event.keycode == KEY_C:

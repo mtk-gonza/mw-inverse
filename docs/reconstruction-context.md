@@ -26,7 +26,7 @@ La referencia original permanece separada y no es una dependencia distribuible.
 
 - Proyecto codebase-memory: `mw-inverse`.
 - Última reindexación: 2026-10-19.
-- 681 nodos y 2.185 relaciones.
+- 702 nodos y 2.324 relaciones.
 - Exclusiones intencionadas: `reference-original`, `client/assets/reference-local`,
   `server/data`, `__pycache__` y `.godot`.
 - Hay recuperación parcial conocida en rangos de `client/scripts/main.gd` y

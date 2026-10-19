@@ -1,7 +1,11 @@
 extends Node3D
 
+const ReferenceOverrideModel = preload("res://scripts/reference_override.gd")
+
 var animated_objects: Array[Node3D] = []
+var animated_origins: Dictionary = {}
 var elapsed := 0.0
+var reference_override = ReferenceOverrideModel.new()
 
 func _ready() -> void:
 	_build_forest()
@@ -19,7 +23,13 @@ func _process(delta: float) -> void:
 	for index in animated_objects.size():
 		var object := animated_objects[index]
 		if is_instance_valid(object):
-			object.position.y += sin(elapsed * 1.5 + float(index)) * 0.002
+			var origin: Vector3 = animated_origins.get(object.get_instance_id(), object.position)
+			object.position.y = origin.y + sin(elapsed * 1.5 + float(index)) * 0.045
+			object.rotation_degrees.y += 0.02
+
+func _animate(object: Node3D) -> void:
+	animated_objects.append(object)
+	animated_origins[object.get_instance_id()] = object.position
 
 func _material(color: Color, emission := Color(0, 0, 0, 1)) -> StandardMaterial3D:
 	var result := StandardMaterial3D.new()
@@ -70,8 +80,7 @@ func _build_crystals() -> void:
 		var reference_fx := Sprite3D.new()
 		reference_fx.name = "ReferenceCrystalFx"
 		var reference_fx_path := "res://assets/reference-library/Sprite/sharedassets0_fx_rank_rays_0_857.png"
-		if ResourceLoader.exists(reference_fx_path):
-			reference_fx.texture = load(reference_fx_path) as Texture2D
+		reference_fx.texture = reference_override.load_slot("crystal_fx", reference_fx_path)
 		reference_fx.pixel_size = 0.004
 		reference_fx.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		reference_fx.no_depth_test = true
@@ -80,7 +89,7 @@ func _build_crystals() -> void:
 		crystal.add_child(reference_fx)
 		shard.rotation_degrees = Vector3(0, index * 37.0, 12)
 		crystal.position = positions[index]
-		animated_objects.append(crystal)
+		_animate(crystal)
 
 func _build_lanterns() -> void:
 	for position in [Vector3(-7, 0.8, -1), Vector3(7, 0.8, -1), Vector3(0, 0.8, 4)]:
@@ -110,7 +119,7 @@ func _build_snow_sparks() -> void:
 		spark.material_override = _material(Color(0.8, 0.95, 1, 0.8), Color(0.3, 0.55, 1, 1))
 		spark.position = Vector3(-8.0 + fmod(float(index * 3), 16.0), 1.2 + float(index % 4) * 0.45, -7.0 + fmod(float(index * 5), 14.0))
 		add_child(spark)
-		animated_objects.append(spark)
+		_animate(spark)
 
 func _build_reference_natural_props() -> void:
 	var props := [
@@ -182,6 +191,14 @@ func _build_region_portals() -> void:
 		portal.name = "RegionPortal"
 		portal.position = data.position
 		add_child(portal)
+		var portal_sprite := Sprite3D.new()
+		portal_sprite.texture = reference_override.load_slot("portal", "res://assets/sprites/world/portal.svg")
+		portal_sprite.pixel_size = 0.012
+		portal_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		portal_sprite.no_depth_test = true
+		portal_sprite.position.y = 0.7
+		portal_sprite.modulate = data.color
+		portal.add_child(portal_sprite)
 		var ring := MeshInstance3D.new()
 		var ring_mesh := TorusMesh.new()
 		ring_mesh.inner_radius = 0.72
@@ -251,6 +268,14 @@ func _build_shrines() -> void:
 		shrine.add_to_group("shrines")
 		shrine.position = data.position
 		add_child(shrine)
+		var shrine_sprite := Sprite3D.new()
+		shrine_sprite.texture = reference_override.load_slot("shrine", "res://assets/sprites/world/shrine.svg")
+		shrine_sprite.pixel_size = 0.006
+		shrine_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		shrine_sprite.no_depth_test = true
+		shrine_sprite.position = Vector3(0, 0.8, -0.16)
+		shrine_sprite.modulate = data.color
+		shrine.add_child(shrine_sprite)
 		var pedestal := MeshInstance3D.new()
 		var pedestal_mesh := CylinderMesh.new()
 		pedestal_mesh.top_radius = 0.32

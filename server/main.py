@@ -11,18 +11,32 @@ import secrets
 import time
 import hashlib
 import hmac
+import base64
 import os
 import ssl
 import signal
-import base64
-import struct
 from dataclasses import dataclass, field
 from typing import Any
 
 from storage import PlayerStorage
 from game_data import RECIPES, item_definition
 from quests import QUESTS, initial_quests
+from auth import mfa_code as _mfa_code
+from auth import password_hash as _password_hash
+from auth import safe_username as _safe_username
+from combat import apply_enemy_damage as _combat_apply_enemy_damage
+from combat import enemy_loot as _enemy_loot
+from economy import buy_item, consume_item, craft_item, equip_item, sell_item
+from exploration import create_referral, discover_shrine, enter_region, place_decor, store_decor
+from progression import advance_after_defeat, try_create_match
+from pvp import record_attack as _pvp_record_attack
+from pvp import status_snapshot as _pvp_status_snapshot
+from session import login_request
+from social import accept_trade, commit_trade, create_clan, create_party, join_clan, join_party, offer_trade, request_trade
+from world_simulation import respawn_enemies, update_enemy_ai
+import transport
 from world_data import NPCS, REGIONS, region_snapshot
+from world_rules import blocked_by_obstacle, has_line_of_sight
 
 
 HOST = os.getenv("MW_INVERSE_HOST", "127.0.0.1")
@@ -63,6 +77,9 @@ class Player:
     energy: int = MAX_ENERGY
     kills: int = 0
     pvp_enabled: bool = False
+    pvp_mark_until: float = field(default=0.0, repr=False)
+    pvp_skull_until: float = field(default=0.0, repr=False)
+    pvp_timeline: list[dict[str, Any]] = field(default_factory=list, repr=False)
     discovered_shrines: list[str] = field(default_factory=list)
     decor: list[dict[str, Any]] = field(default_factory=list)
     referral_code: str = ""
@@ -74,6 +91,8 @@ class Player:
     request_cache: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     movement_locked_until: float = field(default=0.0, repr=False)
     blocked_players: list[str] = field(default_factory=list)
+    exploration_session_generation: int = 0
+    exploration_request_versions: dict[str, int] = field(default_factory=dict)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -94,11 +113,14 @@ class Player:
             "energy": self.energy,
             "kills": self.kills,
             "pvp_enabled": self.pvp_enabled,
+            "pvp_status": _pvp_status_snapshot(self),
             "discovered_shrines": list(self.discovered_shrines),
             "decor": [piece.copy() for piece in self.decor],
             "referral_code": self.referral_code,
             "clan_id": self.clan_id,
             "blocked_players": list(self.blocked_players),
+            "exploration_session_generation": self.exploration_session_generation,
+            "exploration_request_versions": self.exploration_request_versions.copy(),
         }
 
 
@@ -161,22 +183,6 @@ def _cache_request(player: Player, message: dict[str, Any], result: dict[str, An
         del player.request_cache[next(iter(player.request_cache))]
 
 
-def _password_hash(username: str, password: str, salt: str) -> str:
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), (username + salt).encode(), 120_000).hex()
-
-
-def _safe_username(value: Any) -> str:
-    return "".join(character for character in str(value).strip().lower() if character.isalnum() or character in "_-.")[:32]
-
-
-def _mfa_code(secret: str, timestamp: int | None = None) -> str:
-    counter = int(time.time() // 30) if timestamp is None else int(timestamp // 30)
-    digest = hmac.new(base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8)), struct.pack(">Q", counter), hashlib.sha1).digest()
-    offset = digest[-1] & 15
-    number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1_000_000
-    return f"{number:06d}"
-
-
 def presence_snapshot() -> dict[str, Any]:
     return response(
         "world_snapshot",
@@ -200,22 +206,15 @@ def _region_enemy_snapshot(region_id: str) -> tuple[dict[str, int], dict[str, di
 
 
 def _blocked_by_obstacle(x: float, z: float, radius: float = 0.55) -> bool:
-    return any(math.hypot(x - obstacle_x, z - obstacle_z) < obstacle_radius + radius
-               for obstacle_x, obstacle_z, obstacle_radius in WORLD_OBSTACLES)
+    return blocked_by_obstacle(WORLD_OBSTACLES, x, z, radius)
 
 
 def _has_line_of_sight(start_x: float, start_z: float, end_x: float, end_z: float) -> bool:
-    distance = math.hypot(end_x - start_x, end_z - start_z)
-    steps = max(1, int(distance / 0.35))
-    for index in range(1, steps):
-        ratio = index / steps
-        if _blocked_by_obstacle(start_x + (end_x - start_x) * ratio,
-                                start_z + (end_z - start_z) * ratio, radius=0.0):
-            return False
-    return True
+    return has_line_of_sight(WORLD_OBSTACLES, start_x, start_z, end_x, end_z)
 
 
 async def handle_message(player: Player | None, message: dict[str, Any]) -> tuple[Player | None, dict[str, Any]]:
+    global MATCH_COUNTER
     requested_version = message.get("protocol_version")
     if requested_version is not None and requested_version != PROTOCOL_VERSION:
         return player, response("protocol_error", ok=False, code="unsupported_protocol", expected=PROTOCOL_VERSION, received=requested_version)
@@ -233,41 +232,18 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
 
     if message_type == "login_request":
         player_id = str(message.get("player_id", "local-player"))[:64]
-        player = PLAYERS.get(player_id)
-        if player is None:
-            saved = STORAGE.load(player_id)
-            player = Player(player_id=player_id)
-            if saved and int(saved.get("state_version", 1)) <= SAVE_STATE_VERSION:
-                position = saved.get("position", {})
-                player.x = float(position.get("x", player.x))
-                player.y = float(position.get("y", player.y))
-                player.z = float(position.get("z", player.z))
-                player.health = int(saved.get("health", player.health))
-                player.max_health = int(saved.get("max_health", player.max_health))
-                player.level = int(saved.get("level", player.level))
-                player.experience = int(saved.get("experience", player.experience))
-                player.attack = int(saved.get("attack", player.attack))
-                player.currency = int(saved.get("currency", player.currency))
-                player.equipment = dict(saved.get("equipment", {}))
-                player.region_id = str(saved.get("region_id", player.region_id))
-                player.party_id = str(saved.get("party_id", player.party_id))
-                if player.party_id not in PARTIES:
-                    player.party_id = ""
-                player.quests = dict(saved.get("quests", initial_quests()))
-                player.inventory = dict(saved.get("inventory", {}))
-                player.energy = max(0, min(MAX_ENERGY, int(saved.get("energy", player.energy))))
-                player.kills = max(0, int(saved.get("kills", player.kills)))
-                player.pvp_enabled = bool(saved.get("pvp_enabled", player.pvp_enabled))
-                player.discovered_shrines = [str(item) for item in saved.get("discovered_shrines", [])][:100]
-                player.decor = [dict(piece) for piece in saved.get("decor", []) if isinstance(piece, dict)][:100]
-                player.referral_code = str(saved.get("referral_code", ""))[:32]
-                player.clan_id = str(saved.get("clan_id", ""))[:64]
-                player.blocked_players = [str(item) for item in saved.get("blocked_players", [])][:100]
-            PLAYERS[player_id] = player
-        token = SESSION_TOKENS.get(player.player_id)
-        if token is None:
-            token = secrets.token_urlsafe(24)
-            SESSION_TOKENS[player.player_id] = token
+        player, token = login_request(
+            player_id,
+            players=PLAYERS,
+            session_tokens=SESSION_TOKENS,
+            storage=STORAGE,
+            player_factory=Player,
+            parties=PARTIES,
+            save_state_version=SAVE_STATE_VERSION,
+            initial_quests=initial_quests,
+        )
+        player.exploration_session_generation += 1
+        player.exploration_request_versions.clear()
         return player, response("login_result", ok=True, token=token, state=player.snapshot())
 
     if message_type == "auth_register":
@@ -356,14 +332,11 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
 
     if message_type == "enter_region_request":
         region_id = str(message.get("region_id", ""))
-        if region_id not in REGIONS:
-            return player, response("region_event", ok=False, reason="unknown_region")
-        region = REGIONS[region_id]
-        if not region["level_min"] <= player.level <= region["level_max"]:
-            return player, response("region_event", ok=False, reason="level_restricted")
-        player.region_id = region_id
+        result = enter_region(player, region_id, REGIONS)
+        if not result["ok"]:
+            return player, response("region_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("region_event", ok=True, region=region_snapshot(region_id))
+        return player, response("region_event", **result)
 
     if message_type == "npc_interact":
         npc_id = str(message.get("npc_id", ""))
@@ -373,54 +346,56 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
         return player, response("dialogue_event", ok=True, npc_id=npc_id, name=npc["name"], dialogue=npc["dialogue"])
 
     if message_type == "exploration_snapshot":
+        request_version = int(message.get("request_version", 0))
+        current_version = player.exploration_request_versions.get("snapshot", 0)
+        if request_version and request_version < current_version:
+            return player, response("exploration_event", ok=False, reason="stale_request",
+                                    session_generation=player.exploration_session_generation,
+                                    request_version=current_version)
+        if request_version:
+            player.exploration_request_versions["snapshot"] = request_version
         region = REGIONS[player.region_id]
         return player, response("exploration_event", ok=True, region_id=player.region_id,
                                 shrines=region.get("shrines", []), discovered=list(player.discovered_shrines),
-                                hunts=[quest_id for quest_id in QUESTS if quest_id in player.quests])
+                                hunts=[quest_id for quest_id in QUESTS if quest_id in player.quests],
+                                session_generation=player.exploration_session_generation,
+                                request_version=player.exploration_request_versions.get("snapshot", 0))
 
     if message_type == "discover_shrine":
         shrine_id = str(message.get("shrine_id", ""))
-        if shrine_id not in REGIONS[player.region_id].get("shrines", []):
-            return player, response("exploration_event", ok=False, reason="unknown_shrine")
-        if shrine_id not in player.discovered_shrines:
-            player.discovered_shrines.append(shrine_id)
-            player.experience += 10
+        already_discovered = shrine_id in player.discovered_shrines
+        result = discover_shrine(player, shrine_id, REGIONS)
+        if not result["ok"]:
+            return player, response("exploration_event", **result)
+        if not already_discovered:
             STORAGE.save(player.player_id, player.snapshot())
-        return player, response("exploration_event", ok=True, shrine_id=shrine_id,
-                                discovered=list(player.discovered_shrines), experience=player.experience)
+        return player, response("exploration_event", **result)
 
     if message_type == "decor_place":
-        if len(player.decor) >= 100:
-            return player, response("decor_event", ok=False, reason="decor_limit")
-        try:
-            piece = {"piece_id": str(message.get("piece_id", "ice_lamp"))[:64],
-                     "x": max(-10.0, min(10.0, float(message.get("x", 0)))),
-                     "z": max(-10.0, min(10.0, float(message.get("z", 0)))),
-                     "rotation": float(message.get("rotation", 0.0)) % 360.0}
-        except (TypeError, ValueError):
-            return player, response("decor_event", ok=False, reason="invalid_piece")
-        player.decor.append(piece)
+        result = place_decor(player, message.get("piece_id", "ice_lamp"), message.get("x", 0), message.get("z", 0), message.get("rotation", 0.0))
+        if not result["ok"]:
+            return player, response("decor_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("decor_event", ok=True, decor=[item.copy() for item in player.decor])
+        return player, response("decor_event", **result)
 
     if message_type == "decor_store":
-        index = int(message.get("index", -1))
-        if index < 0 or index >= len(player.decor):
-            return player, response("decor_event", ok=False, reason="invalid_piece")
-        player.decor.pop(index)
+        result = store_decor(player, int(message.get("index", -1)))
+        if not result["ok"]:
+            return player, response("decor_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("decor_event", ok=True, decor=[item.copy() for item in player.decor])
+        return player, response("decor_event", **result)
 
     if message_type == "referral_create":
-        if not player.referral_code:
-            player.referral_code = f"MW-{player.player_id[:8].upper()}"
+        had_referral = bool(player.referral_code)
+        result = create_referral(player)
+        if not had_referral:
             STORAGE.save(player.player_id, player.snapshot())
-        return player, response("referral_event", ok=True, code=player.referral_code)
+        return player, response("referral_event", **result)
 
     if message_type == "matchmake_join":
         if player.player_id not in MATCHMAKING_QUEUE:
             MATCHMAKING_QUEUE.append(player.player_id)
-        match_id = _try_create_match()
+        match_id, MATCH_COUNTER = try_create_match(MATCHMAKING_QUEUE, MATCHES, MATCH_COUNTER)
         if match_id:
             return player, response("matchmaking_event", ok=True, state="matched", match_id=match_id,
                                     opponents=sorted(MATCHES[match_id]))
@@ -498,37 +473,21 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
         if cached is not None:
             return player, cached
         item_id = str(message.get("item_id", ""))
-        definition = item_definition(item_id)
-        if definition["kind"] != "consumable" or player.inventory.get(item_id, 0) <= 0:
-            return player, response("item_event", ok=False, reason="item_not_available")
-        player.inventory[item_id] -= 1
-        player.energy = min(MAX_ENERGY, player.energy + int(definition.get("energy", 0)))
-        player.health = min(player.max_health, player.health + int(definition.get("health", 0)))
-        if player.inventory[item_id] == 0:
-            del player.inventory[item_id]
+        result = consume_item(player, item_id, item_definition, MAX_ENERGY)
+        if not result["ok"]:
+            return player, response("item_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        result = response("item_event", ok=True, item_id=item_id, energy=player.energy, health=player.health, inventory=player.inventory.copy())
-        _cache_request(player, message, result)
-        return player, result
+        event = response("item_event", **result)
+        _cache_request(player, message, event)
+        return player, event
 
     if message_type == "craft_request":
         item_id = str(message.get("item_id", ""))
-        recipe = RECIPES.get(item_id)
-        if recipe is None:
-            return player, response("craft_event", ok=False, reason="unknown_recipe")
-        if player.currency < int(recipe.get("currency", 0)):
-            return player, response("craft_event", ok=False, reason="insufficient_currency")
-        requirements = recipe.get("requires", {})
-        if any(player.inventory.get(material, 0) < int(amount) for material, amount in requirements.items()):
-            return player, response("craft_event", ok=False, reason="missing_materials")
-        for material, amount in requirements.items():
-            player.inventory[material] -= int(amount)
-            if player.inventory[material] <= 0:
-                del player.inventory[material]
-        player.currency -= int(recipe.get("currency", 0))
-        player.inventory[item_id] = player.inventory.get(item_id, 0) + 1
+        result = craft_item(player, item_id, RECIPES)
+        if not result["ok"]:
+            return player, response("craft_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("craft_event", ok=True, item_id=item_id, currency=player.currency, inventory=player.inventory.copy())
+        return player, response("craft_event", **result)
 
     if message_type == "skill_request":
         cached = _cached_request(player, message)
@@ -571,7 +530,7 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
             ENEMY_SLOWED_UNTIL[target_id] = now + float(skill.get("slow_seconds", 0.0))
         if defeated:
             ENEMY_RESPAWN_AT[target_id] = time.monotonic() + 12.0
-            _advance_after_defeat(player, target_id)
+            advance_after_defeat(player, target_id, QUESTS)
         loot = _enemy_loot(target_id) if defeated else {}
         STORAGE.save(player.player_id, player.snapshot())
         result = response("skill_event", ok=True, skill_id=skill_id, target_id=target_id, damage=damage,
@@ -586,7 +545,8 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
     if message_type == "pvp_toggle":
         player.pvp_enabled = bool(message.get("enabled", False))
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("pvp_event", ok=True, enabled=player.pvp_enabled)
+        return player, response("pvp_event", ok=True, enabled=player.pvp_enabled,
+                                pvp_status=_pvp_status_snapshot(player))
 
     if message_type == "respawn_request":
         player.x, player.y, player.z = 0.0, 1.1, 0.0
@@ -597,129 +557,93 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
 
     if message_type == "party_create":
         global PARTY_COUNTER
-        if player.party_id:
-            return player, response("party_event", ok=False, reason="already_in_party")
-        PARTY_COUNTER += 1
-        party_id = f"party-{PARTY_COUNTER}"
-        PARTIES[party_id] = {player.player_id}
-        player.party_id = party_id
+        result, PARTY_COUNTER = create_party(player, PARTIES, PARTY_COUNTER)
+        if not result["ok"]:
+            return player, response("party_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("party_event", ok=True, party_id=party_id, members=sorted(PARTIES[party_id]))
+        return player, response("party_event", **result)
 
     if message_type == "party_join":
         party_id = str(message.get("party_id", ""))
-        if player.party_id or party_id not in PARTIES:
-            return player, response("party_event", ok=False, reason="party_unavailable")
-        if len(PARTIES[party_id]) >= 5:
-            return player, response("party_event", ok=False, reason="party_full")
-        PARTIES[party_id].add(player.player_id)
-        player.party_id = party_id
+        result = join_party(player, party_id, PARTIES)
+        if not result["ok"]:
+            return player, response("party_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("party_event", ok=True, party_id=party_id, members=sorted(PARTIES[party_id]))
+        return player, response("party_event", **result)
 
     if message_type == "clan_create":
         global CLAN_COUNTER
-        if getattr(player, "clan_id", ""):
-            return player, response("clan_event", ok=False, reason="already_in_clan")
-        CLAN_COUNTER += 1
-        clan_id = f"clan-{CLAN_COUNTER}"
-        CLANS[clan_id] = {player.player_id}
-        player.clan_id = clan_id
+        result, CLAN_COUNTER = create_clan(player, CLANS, CLAN_COUNTER)
+        if not result["ok"]:
+            return player, response("clan_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("clan_event", ok=True, clan_id=clan_id, members=sorted(CLANS[clan_id]))
+        return player, response("clan_event", **result)
 
     if message_type == "clan_join":
         clan_id = str(message.get("clan_id", ""))
-        if getattr(player, "clan_id", "") or clan_id not in CLANS:
-            return player, response("clan_event", ok=False, reason="clan_unavailable")
-        if len(CLANS[clan_id]) >= 20:
-            return player, response("clan_event", ok=False, reason="clan_full")
-        CLANS[clan_id].add(player.player_id)
-        player.clan_id = clan_id
+        result = join_clan(player, clan_id, CLANS)
+        if not result["ok"]:
+            return player, response("clan_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("clan_event", ok=True, clan_id=clan_id, members=sorted(CLANS[clan_id]))
+        return player, response("clan_event", **result)
 
     if message_type == "trade_request":
         target_id = str(message.get("target_id", ""))
-        target = PLAYERS.get(target_id)
-        if target is None or target_id == player.player_id or target.region_id != player.region_id:
-            return player, response("trade_event", ok=False, reason="target_unavailable")
-        TRADE_REQUESTS[target_id] = player.player_id
-        return player, response("trade_event", ok=True, state="requested", target_id=target_id)
+        result = request_trade(player, target_id, PLAYERS, TRADE_REQUESTS)
+        return player, response("trade_event", **result)
 
     if message_type == "trade_accept":
-        requester_id = TRADE_REQUESTS.pop(player.player_id, "")
-        if not requester_id or requester_id not in PLAYERS:
-            return player, response("trade_event", ok=False, reason="trade_not_found")
-        key = tuple(sorted((player.player_id, requester_id)))
-        TRADE_OFFERS[key] = {player.player_id: {}, requester_id: {}}
-        return player, response("trade_event", ok=True, state="opened", trade_id="|".join(key), partner_id=requester_id)
+        result = accept_trade(player, PLAYERS, TRADE_REQUESTS, TRADE_OFFERS)
+        return player, response("trade_event", **result)
 
     if message_type == "trade_offer":
         partner_id = str(message.get("partner_id", ""))
-        key = tuple(sorted((player.player_id, partner_id)))
-        trade = TRADE_OFFERS.get(key)
         item_id = str(message.get("item_id", ""))
-        amount = max(0, min(99, int(message.get("amount", 0))))
-        if trade is None or item_id not in player.inventory or amount > player.inventory[item_id]:
-            return player, response("trade_event", ok=False, reason="invalid_offer")
-        trade[player.player_id] = {item_id: amount}
-        return player, response("trade_event", ok=True, state="offered", partner_id=partner_id, offer=trade[player.player_id])
+        amount = int(message.get("amount", 0))
+        result = offer_trade(player, partner_id, item_id, amount, TRADE_OFFERS)
+        return player, response("trade_event", **result)
 
     if message_type == "trade_commit":
         cached = _cached_request(player, message)
         if cached is not None:
             return player, cached
         partner_id = str(message.get("partner_id", ""))
-        key = tuple(sorted((player.player_id, partner_id)))
-        trade = TRADE_OFFERS.pop(key, None)
-        partner = PLAYERS.get(partner_id)
-        if trade is None or partner is None:
-            return player, response("trade_event", ok=False, reason="trade_not_found")
-        _execute_trade(player, partner, trade)
+        result = commit_trade(player, partner_id, PLAYERS, TRADE_OFFERS)
+        if not result["ok"]:
+            return player, response("trade_event", **result)
+        partner = result.pop("partner")
         STORAGE.save(player.player_id, player.snapshot())
         STORAGE.save(partner.player_id, partner.snapshot())
-        result = response("trade_event", ok=True, state="completed", inventory=player.inventory.copy())
-        _cache_request(player, message, result)
-        return player, result
+        event = response("trade_event", **result)
+        _cache_request(player, message, event)
+        return player, event
 
     if message_type == "buy_request":
         cached = _cached_request(player, message)
         if cached is not None:
             return player, cached
         item_id = str(message.get("item_id", ""))
-        definition = item_definition(item_id)
-        price = int(definition.get("price", 0))
-        if definition["kind"] == "unknown" or price <= 0:
-            return player, response("shop_event", ok=False, reason="item_unavailable")
-        if player.currency < price:
-            return player, response("shop_event", ok=False, reason="insufficient_currency")
-        player.currency -= price
-        player.inventory[item_id] = player.inventory.get(item_id, 0) + 1
+        result = buy_item(player, item_id, item_definition)
+        if not result["ok"]:
+            return player, response("shop_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        result = response("shop_event", ok=True, item_id=item_id, currency=player.currency, inventory=player.inventory.copy())
-        _cache_request(player, message, result)
-        return player, result
+        event = response("shop_event", **result)
+        _cache_request(player, message, event)
+        return player, event
 
     if message_type == "sell_request":
         cached = _cached_request(player, message)
         if cached is not None:
             return player, cached
         item_id = str(message.get("item_id", ""))
-        amount = max(1, min(99, int(message.get("amount", 1))))
-        definition = item_definition(item_id)
-        owned = player.inventory.get(item_id, 0)
-        if definition["kind"] == "unknown" or owned < amount or int(definition.get("price", 0)) <= 0:
-            return player, response("shop_event", ok=False, reason="item_not_sellable")
-        player.inventory[item_id] = owned - amount
-        if player.inventory[item_id] <= 0:
-            del player.inventory[item_id]
-        player.currency += int(definition["price"]) * amount
+        amount = int(message.get("amount", 1))
+        result = sell_item(player, item_id, amount, item_definition)
+        if not result["ok"]:
+            return player, response("shop_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        result = response("shop_event", ok=True, action="sell", item_id=item_id, amount=amount,
-                          currency=player.currency, inventory=player.inventory.copy())
-        _cache_request(player, message, result)
-        return player, result
+        event = response("shop_event", **result)
+        _cache_request(player, message, event)
+        return player, event
 
     if message_type == "move_intent":
         if time.monotonic() < player.movement_locked_until:
@@ -751,14 +675,11 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
 
     if message_type == "equip_request":
         item_id = str(message.get("item_id", ""))
-        definition = item_definition(item_id)
-        if definition["kind"] != "weapon" or player.inventory.get(item_id, 0) <= 0:
-            return player, response("equipment_event", ok=False, reason="item_not_available")
-        player.equipment[definition["slot"]] = item_id
-        player.attack = 10 + sum(item_definition(item).get("attack", 0) for item in player.equipment.values())
+        result = equip_item(player, item_id, item_definition)
+        if not result["ok"]:
+            return player, response("equipment_event", **result)
         STORAGE.save(player.player_id, player.snapshot())
-        return player, response("equipment_event", ok=True, equipment=player.equipment.copy(), attack=player.attack,
-                                inventory=player.inventory.copy())
+        return player, response("equipment_event", **result)
 
     if message_type == "attack_request":
         cached = _cached_request(player, message)
@@ -779,7 +700,7 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
         level_up = False
         if defeated:
             ENEMY_RESPAWN_AT[target_id] = time.monotonic() + 12.0
-            level_up = _advance_after_defeat(player, target_id)
+            level_up = advance_after_defeat(player, target_id, QUESTS)
         loot = _enemy_loot(target_id) if defeated else {}
         STORAGE.save(player.player_id, player.snapshot())
         result = response(
@@ -818,10 +739,13 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
             player.kills += 1
             target.x, target.y, target.z = 0.0, 1.1, 0.0
             target.health = target.max_health
+        _pvp_record_attack(player, target, damage, defeated)
         STORAGE.save(target.player_id, target.snapshot())
         STORAGE.save(player.player_id, player.snapshot())
         return player, response("pvp_event", ok=True, target_id=target_id, damage=damage,
-                                defeated=defeated, target_health=target.health)
+                                defeated=defeated, target_health=target.health,
+                                pvp_status=_pvp_status_snapshot(player),
+                                target_pvp_status=_pvp_status_snapshot(target))
 
     if message_type == "world_tick":
         _respawn_enemies()
@@ -839,158 +763,38 @@ async def handle_message(player: Player | None, message: dict[str, Any]) -> tupl
 
 
 def _apply_enemy_damage(player: Player, target_id: str, damage: int) -> bool:
-    """Apply a validated server-side hit and grant rewards exactly once."""
-    was_alive = ENEMY_HEALTH[target_id] > 0
-    ENEMY_HEALTH[target_id] = max(0, ENEMY_HEALTH[target_id] - max(1, damage))
-    defeated = was_alive and ENEMY_HEALTH[target_id] == 0
-    if defeated:
-        for item_id, amount in _enemy_loot(target_id).items():
-            player.inventory[item_id] = player.inventory.get(item_id, 0) + amount
-    return defeated
-
-
-def _enemy_loot(target_id: str) -> dict[str, int]:
-    if target_id == "frost_guardian":
-        return {"monster_core": 1, "ice_shard": 4, "frost_core": 1}
-    if target_id.startswith("frost_"):
-        return {"monster_core": 1, "ice_shard": 2}
-    return {"monster_core": 1}
+    return _combat_apply_enemy_damage(ENEMY_HEALTH, player, target_id, damage, _enemy_loot)
 
 
 def _respawn_enemies() -> None:
-    now = time.monotonic()
-    for enemy_id, respawn_at in list(ENEMY_RESPAWN_AT.items()):
-        if now < respawn_at:
-            continue
-        ENEMY_HEALTH[enemy_id] = 120 if enemy_id == "frost_guardian" else 45 if enemy_id.startswith("frost_wisp") else 30
-        ENEMY_RESPAWN_AT.pop(enemy_id, None)
-
-
-def _advance_after_defeat(player: Player, target_id: str) -> bool:
-    previous_level = player.level
-    player.kills += 1
-    player.experience += 25
-    for quest_id, quest in QUESTS.items():
-        progress = player.quests.setdefault(quest_id, {"progress": 0, "completed": False})
-        if not progress["completed"] and target_id.startswith(quest["target"]):
-            progress["progress"] = min(quest["goal"], int(progress["progress"]) + 1)
-            if progress["progress"] >= quest["goal"]:
-                progress["completed"] = True
-                player.experience += quest["experience_reward"]
-    while player.experience >= player.level * 100:
-        player.experience -= player.level * 100
-        player.level += 1
-        player.max_health += 10
-        player.health = player.max_health
-        player.attack += 2
-    return player.level > previous_level
-
-
-def _execute_trade(player: Player, partner: Player, trade: dict[str, dict[str, int]]) -> None:
-    for owner, recipient in ((player, partner), (partner, player)):
-        for item_id, amount in trade.get(owner.player_id, {}).items():
-            owner.inventory[item_id] -= amount
-            if owner.inventory[item_id] <= 0:
-                del owner.inventory[item_id]
-            recipient.inventory[item_id] = recipient.inventory.get(item_id, 0) + amount
+    respawn_enemies(ENEMY_HEALTH, ENEMY_RESPAWN_AT)
 
 
 def _update_enemy_ai(player: Player) -> list[dict[str, Any]]:
-    attacks: list[dict[str, Any]] = []
-    now = time.monotonic()
-    for enemy_id, position in ENEMY_POSITIONS.items():
-        if ENEMY_HEALTH.get(enemy_id, 0) <= 0:
-            continue
-        dx = player.x - position["x"]
-        dz = player.z - position["z"]
-        distance = math.hypot(dx, dz)
-        if 1.5 < distance < 12.0:
-            speed_factor = 0.45 if ENEMY_SLOWED_UNTIL.get(enemy_id, 0.0) > now else 1.0
-            step = min(0.12 * speed_factor, (distance - 1.5) / max(distance, 0.001))
-            position["x"] += dx / distance * step
-            position["z"] += dz / distance * step
-        if distance <= 1.7:
-            cooldown_key = (player.player_id, enemy_id)
-            if ENEMY_ATTACK_AT.get(cooldown_key, 0.0) <= now and player.health > 0:
-                base_damage = 10 if enemy_id == "frost_guardian" else 4
-                damage = base_damage // 2 if player.guarded_until > now else base_damage
-                player.health = max(0, player.health - max(1, damage))
-                ENEMY_ATTACK_AT[cooldown_key] = now + (2.5 if enemy_id == "frost_guardian" else 1.8)
-                attacks.append({"enemy_id": enemy_id, "damage": damage, "health": player.health})
-    if attacks:
-        STORAGE.save(player.player_id, player.snapshot())
-    return attacks
-
-
-def _try_create_match() -> str:
-    global MATCH_COUNTER
-    if len(MATCHMAKING_QUEUE) < 2:
-        return ""
-    first = MATCHMAKING_QUEUE.pop(0)
-    second = MATCHMAKING_QUEUE.pop(0)
-    MATCH_COUNTER += 1
-    match_id = f"arena-{MATCH_COUNTER}"
-    MATCHES[match_id] = {first, second}
-    return match_id
+    return update_enemy_ai(
+        player,
+        ENEMY_POSITIONS,
+        ENEMY_HEALTH,
+        ENEMY_SLOWED_UNTIL,
+        ENEMY_ATTACK_AT,
+        STORAGE,
+    )
 
 
 async def client_connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    player: Player | None = None
-    try:
-        while line := await reader.readline():
-            if len(line) > MAX_MESSAGE_BYTES:
-                result = response("error", code="message_too_large")
-                writer.write((json.dumps(result, separators=(",", ":")) + "\n").encode())
-                await writer.drain()
-                break
-            try:
-                message = json.loads(line)
-                if not isinstance(message, dict):
-                    raise ValueError("message must be an object")
-                player, result = await handle_message(player, message)
-            except (ValueError, TypeError, json.JSONDecodeError) as error:
-                result = response("error", code="invalid_message", detail=str(error))
-            if player is not None:
-                ACTIVE_WRITERS.add(writer)
-                WRITER_PLAYERS[writer] = player.player_id
-                ONLINE_PLAYER_IDS.add(player.player_id)
-            encoded = (json.dumps(result, separators=(",", ":")) + "\n").encode()
-            if result.get("type") == "chat_event" and result.get("ok", False):
-                for recipient in list(ACTIVE_WRITERS):
-                    recipient_player = PLAYERS.get(WRITER_PLAYERS.get(recipient, ""))
-                    if not _chat_recipient_allowed(player, recipient_player, result.get("channel", "local"), result.get("recipient_id", "")):
-                        continue
-                    try:
-                        recipient.write(encoded)
-                        await recipient.drain()
-                    except (ConnectionError, OSError):
-                        ACTIVE_WRITERS.discard(recipient)
-            elif result.get("type") == "movement_snapshot":
-                writer.write(encoded)
-                await writer.drain()
-                presence = (json.dumps(presence_snapshot(), separators=(",", ":")) + "\n").encode()
-                for recipient in list(ACTIVE_WRITERS):
-                    try:
-                        recipient.write(presence)
-                        await recipient.drain()
-                    except (ConnectionError, OSError):
-                        ACTIVE_WRITERS.discard(recipient)
-            else:
-                writer.write(encoded)
-                await writer.drain()
-    finally:
-        ACTIVE_WRITERS.discard(writer)
-        WRITER_PLAYERS.pop(writer, None)
-        if player is not None and not any(
-            session_player == player.player_id for session_player in ONLINE_PLAYER_IDS if session_player != player.player_id
-        ):
-            ONLINE_PLAYER_IDS.discard(player.player_id)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except (ConnectionError, OSError):
-            # The peer may already have closed its socket during shutdown.
-            pass
+    await transport.client_connected(
+        reader,
+        writer,
+        handle_message=handle_message,
+        response=response,
+        presence_snapshot=presence_snapshot,
+        chat_recipient_allowed=_chat_recipient_allowed,
+        max_message_bytes=MAX_MESSAGE_BYTES,
+        active_writers=ACTIVE_WRITERS,
+        writer_players=WRITER_PLAYERS,
+        online_player_ids=ONLINE_PLAYER_IDS,
+        players=PLAYERS,
+    )
 
 
 def _chat_recipient_allowed(sender: Player, recipient: Player | None, channel: str, recipient_id: str = "") -> bool:

@@ -41,7 +41,7 @@ Iniciar cliente → conectar servidor → entrar al mundo
 - Cámara cenital/isométrica.
 - Agua procedural, isla, árboles y efectos de combate.
 - Guardado local y recuperación de estados antiguos.
-- 34 pruebas automatizadas y pruebas TCP reales.
+- 56 pruebas automatizadas y pruebas TCP reales.
 
 ## Alcance fuera de este experimento
 
